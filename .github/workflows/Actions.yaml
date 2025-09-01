@@ -25,32 +25,41 @@ jobs:
       - name: Run GetAll.py
         run: python GetAll.py
 
+      - name: Count generated files
+        id: count_files
+        run: |
+          MD_COUNT=$(find poorstock -name "*.md" 2>/dev/null | wc -l || echo "0")
+          echo "md_files=$MD_COUNT" >> $GITHUB_OUTPUT
+          echo "Generated $MD_COUNT markdown files"
+
       - name: Commit and Push Results
-        id: commit
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # Add updated stock list
+          # Add updated files
           git add StockID_TWSE_TPEX.csv || true
-
-          # Add all markdown files (例如 poorstock/*.md)
           git add poorstock/*.md || true
-
+          git add poorstock/*.csv || true
+          
           # Check if there are changes to commit
           if git diff --staged --quiet; then
             echo "No changes to commit"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            COMMIT_MSG="Update ${{ steps.params.outputs.type_name }} Data"
-            COMMIT_MSG="$COMMIT_MSG (${{ steps.file_summary.outputs.current_type_files }} files, ${{ steps.download.outputs.download_duration }}s)"
-            if [[ "${{ steps.params.outputs.test_flag }}" == "--test" ]]; then
-              COMMIT_MSG="$COMMIT_MSG [Test]"
+            # Create commit message
+            TIMESTAMP=$(date '+%Y-%m-%d %H:%M UTC')
+            MD_FILES="${{ steps.count_files.outputs.md_files }}"
+            TRIGGER_TYPE="${{ github.event_name }}"
+            
+            COMMIT_MSG="Update PoorStock Data (${MD_FILES} files) - ${TIMESTAMP}"
+            if [[ "$TRIGGER_TYPE" == "workflow_dispatch" ]]; then
+              COMMIT_MSG="$COMMIT_MSG [Manual]"
+            else
+              COMMIT_MSG="$COMMIT_MSG [Scheduled]"
             fi
-            COMMIT_MSG="$COMMIT_MSG [${{ steps.params.outputs.trigger_type }}-v1.7.0]"
-            COMMIT_MSG="$COMMIT_MSG - $(date '+%Y-%m-%d %H:%M UTC')"
-            git commit -m "$COMMIT_MSG" || true
-            git push || true
+            
+            echo "Committing with message: $COMMIT_MSG"
+            git commit -m "$COMMIT_MSG"
+            git push
             echo "Changes committed and pushed successfully"
-            echo "Commit message: $COMMIT_MSG"
-            echo
+          fi
