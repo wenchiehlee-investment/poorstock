@@ -1,0 +1,3 @@
+src/pipelines/__pycache__
+*.bak
+poorstock/*.txt

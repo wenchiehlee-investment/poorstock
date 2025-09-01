@@ -1,0 +1,56 @@
+name: Daily PoorStock Batch
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # 每天台灣時間16:00 (UTC+8)
+  workflow_dispatch:      # 可手動觸發
+
+jobs:
+  run-poorstock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run GetAll.py
+        run: python GetAll.py
+
+      - name: Commit and Push Results
+        id: commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Add updated stock list
+          git add StockID_TWSE_TPEX.csv || true
+
+          # Add all markdown files (例如 poorstock/*.md)
+          git add poorstock/*.md || true
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            COMMIT_MSG="Update ${{ steps.params.outputs.type_name }} Data"
+            COMMIT_MSG="$COMMIT_MSG (${{ steps.file_summary.outputs.current_type_files }} files, ${{ steps.download.outputs.download_duration }}s)"
+            if [[ "${{ steps.params.outputs.test_flag }}" == "--test" ]]; then
+              COMMIT_MSG="$COMMIT_MSG [Test]"
+            fi
+            COMMIT_MSG="$COMMIT_MSG [${{ steps.params.outputs.trigger_type }}-v1.7.0]"
+            COMMIT_MSG="$COMMIT_MSG - $(date '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "$COMMIT_MSG" || true
+            git push || true
+            echo "Changes committed and pushed successfully"
+            echo "Commit message: $COMMIT_MSG"
+            echo
