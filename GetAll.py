@@ -201,7 +201,7 @@ class PoorStockBatchRunner:
             
             # Small delay between requests
             import time
-            time.sleep(2)
+            time.sleep(10)
         
         self.safe_log("info", f"[SUCCESS] Batch processing complete!")
         self.safe_log("info", f"[OK] Successful: {success_count}")
@@ -228,7 +228,7 @@ class PoorStockBatchRunner:
             
             # Delay between requests
             import time
-            time.sleep(2)
+            time.sleep(10)
         
         self.safe_log("info", f"[SUCCESS] All stocks processed: Success={success}, Fail={fail}")
 
