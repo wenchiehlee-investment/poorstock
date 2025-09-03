@@ -25,6 +25,11 @@ jobs:
       - name: Run GetAll.py
         run: python GetAll.py
 
+      - name: Update README Status
+        run: |
+          python download_results_counts.py --update-readme
+          echo "README.md status section updated"
+
       - name: Count generated files
         id: count_files
         run: |
@@ -38,6 +43,7 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
           # Add updated files
+          git add README.md || true
           git add StockID_TWSE_TPEX.csv || true
           git add poorstock/*.md || true
           git add poorstock/*.csv || true

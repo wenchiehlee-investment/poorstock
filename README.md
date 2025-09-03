@@ -2,8 +2,15 @@
 Working space for poorstock
 
 ## Status
-Update time: 2025-09-02 16:45:20
+Update time: 2025-09-03 13:22:27 CST
 
-|No| Folder |Total|Success| Failed|Updated from now|Duration|
-|--| -- |--|--|--|--|--|
-|1| poorstock |117|117|0|1 hours ago|28 minutes|
+| Metric | Value |
+|--------|-------|
+| Total Stocks | 117 |
+| Successful | 108 (100.0%) |
+| Failed | 0 |
+| Unprocessed | 9 |
+| MD Files Found | 108 |
+| Last Updated | 1 days 22 hours ago |
+| Processing Duration | 21 minutes |
+
