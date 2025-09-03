@@ -58,6 +58,7 @@ POORSTOCK_DIR = "poorstock/"
 # - Handle malformed dates (use 'NEVER', 'NOT_PROCESSED')
 # - Count boolean success values correctly
 # - Cross-reference with stock master list
+# - timezone of CSV is UTC
 ```
 
 ### Metric Calculations
@@ -83,17 +84,13 @@ POORSTOCK_DIR = "poorstock/"
 - **Validation**: Should match successful count
 
 #### 6. Last Updated
-- **Source**: Most recent `process_time` from results CSV
+- **Source**: Most recent `process_time` from results CSV on `success=true`
 - **Format**: "X days Y hours ago" or "Never"
-- **Timezone**: Taiwan timezone (Asia/Taipei)
 
 #### 7. Processing Duration
 - **Source**: Time span from first to last `process_time`
 - **Format**: "X days Y hours" or "Single batch"
 
-#### 8. Success Rate
-- **Calculation**: `(Successful / (Successful + Failed)) * 100`
-- **Purpose**: Quality metric for scraping reliability
 
 ### Time Handling Strategy
 

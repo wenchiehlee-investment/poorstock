@@ -37,37 +37,40 @@ except ImportError:
         TAIPEI_TZ = None
         print("Warning: Neither zoneinfo nor pytz available. Using system timezone.")
 
-def get_taipei_time():
-    """Get current time in Taiwan timezone."""
+def get_naive_taipei_time():
+    """Get current time in Taiwan timezone as naive datetime for consistent comparison."""
+    if TAIPEI_TZ:
+        return datetime.now(TAIPEI_TZ).replace(tzinfo=None)
+    else:
+        # Fallback: assume local time is close enough
+        return datetime.now()
+
+def get_taipei_time() -> datetime:
+    """Get current timezone-aware datetime in Asia/Taipei (fallback: local naive)."""
     if TAIPEI_TZ:
         return datetime.now(TAIPEI_TZ)
-    else:
-        return datetime.now()
+    return datetime.now()
 
 class PoorStockStatsAnalyzer:
     """Analyzes PoorStock download results and stock processing status."""
     
     def __init__(self, base_dir: str = "."):
         self.base_dir = Path(base_dir)
-        self.current_time = get_taipei_time()
+        self.current_time = get_naive_taipei_time()
         self.poorstock_dir = self.base_dir / "poorstock"
         self.results_file = self.poorstock_dir / "download_results.csv"
         self.stock_csv = self.base_dir / "StockID_TWSE_TPEX.csv"
     
     def safe_parse_date(self, date_string: str) -> Optional[datetime]:
         """Parse date string with fallback for special values."""
-        if not date_string or date_string.strip() in ['NOT_PROCESSED', 'NEVER', '']:
+        if not date_string or str(date_string).strip().upper() in ['NOT_PROCESSED', 'NEVER', '', 'FAILED', 'NAN', 'NONE']:
             return None
         
         try:
-            # Handle various date formats
+            # Handle various date formats - return as naive datetime
             for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%Y/%m/%d %H:%M:%S']:
                 try:
-                    dt = datetime.strptime(date_string.strip(), fmt)
-                    # Assume parsed datetime is in Taiwan timezone
-                    if TAIPEI_TZ:
-                        dt = dt.replace(tzinfo=TAIPEI_TZ)
-                    return dt
+                    return datetime.strptime(str(date_string).strip(), fmt)
                 except ValueError:
                     continue
             return None
@@ -163,88 +166,89 @@ class PoorStockStatsAnalyzer:
         # Analyze results CSV if it exists
         if not self.results_file.exists():
             default_stats['unprocessed'] = total_stocks
-            default_stats['error'] = 'Results CSV not found'
             return default_stats
         
         try:
-            with open(self.results_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                
-                # Required columns
-                required_cols = ['filename', 'last_update_time', 'success', 'process_time']
-                if not all(col in reader.fieldnames for col in required_cols):
-                    default_stats['error'] = 'Invalid CSV format'
-                    default_stats['unprocessed'] = total_stocks
-                    return default_stats
-                
-                rows = list(reader)
-                
-                if not rows:
-                    default_stats['unprocessed'] = total_stocks
-                    return default_stats
-                
-                # Calculate basic statistics
-                successful = sum(1 for row in rows if row['success'].lower() == 'true')
-                failed = sum(1 for row in rows if row['success'].lower() == 'false')
-                processed = len(rows)
-                unprocessed = max(0, total_stocks - processed)
-                
-                stats = {
-                    'total_stocks': total_stocks,
-                    'successful': successful,
-                    'failed': failed,
-                    'unprocessed': unprocessed,
-                    'md_files_found': len(md_files),
-                    'success_rate': (successful / processed * 100) if processed > 0 else 0.0,
-                    'error': None
-                }
-                
-                # Calculate time-based metrics
-                process_times = []
-                for row in rows:
-                    time_parsed = self.safe_parse_date(row['process_time'])
-                    if time_parsed:
-                        process_times.append(time_parsed)
-                
-                if process_times:
-                    # Last updated (most recent processing time)
-                    last_time = max(process_times)
-                    
-                    # Ensure both times are timezone-aware for proper comparison
-                    if TAIPEI_TZ and last_time.tzinfo is None:
-                        last_time = last_time.replace(tzinfo=TAIPEI_TZ)
-                    
-                    # Calculate time difference
-                    if self.current_time.tzinfo and last_time.tzinfo:
-                        time_diff = self.current_time - last_time
-                    else:
-                        # Fallback for timezone-naive comparison
-                        current_naive = self.current_time.replace(tzinfo=None) if self.current_time.tzinfo else self.current_time
-                        last_naive = last_time.replace(tzinfo=None) if last_time.tzinfo else last_time
-                        time_diff = current_naive - last_naive
-                    
-                    stats['last_updated'] = self.format_time_ago(time_diff)
-                    
-                    # Processing duration (time span from first to last processing)
-                    if len(process_times) > 1:
-                        first_time = min(process_times)
-                        duration_diff = last_time - first_time
-                        stats['processing_duration'] = self.format_duration(duration_diff)
-                    else:
-                        stats['processing_duration'] = "Single batch"
-                else:
-                    stats['last_updated'] = 'Never'
-                    stats['processing_duration'] = 'N/A'
-                
-                return stats
+            # Use pandas for cleaner CSV handling
+            df = pd.read_csv(self.results_file)
+            
+            if df.empty:
+                default_stats['unprocessed'] = total_stocks
+                return default_stats
+            
+            # Handle different boolean representations
+            # Convert string 'True'/'False' to actual booleans if needed
+            if df['success'].dtype == 'object':
+                df['success'] = df['success'].astype(str).str.lower().str.strip().isin(['true', '1', 'yes'])
+            
+            # Calculate basic statistics
+            successful = int(df['success'].sum())
+            failed = int((df['success'] == False).sum())
+            processed = len(df)
+            unprocessed = max(0, total_stocks - processed)
+            
+            stats = {
+                'total_stocks': total_stocks,
+                'successful': successful,
+                'failed': failed,
+                'unprocessed': unprocessed,
+                'md_files_found': len(md_files),
+                'success_rate': (successful / processed * 100) if processed > 0 else 0.0,
+                'error': None
+            }
+            
+            # Calculate time-based metrics - ONLY from successful entries
+            self._calculate_time_metrics(df, stats)
+            
+            return stats
                 
         except Exception as e:
             default_stats['error'] = f"Error reading results file: {str(e)}"
             default_stats['unprocessed'] = total_stocks
             return default_stats
     
+    def _calculate_time_metrics(self, df: pd.DataFrame, stats: Dict):
+        """Calculate time-based metrics from successful entries only."""
+        try:
+            # Filter to successful entries only (as per instructions)
+            successful_df = df[df['success'] == True].copy()
+            
+            if successful_df.empty:
+                stats['last_updated'] = 'Never'
+                stats['processing_duration'] = 'N/A'
+                return
+            
+            # Parse process times from successful entries
+            process_times = []
+            for _, row in successful_df.iterrows():
+                time_parsed = self.safe_parse_date(row['process_time'])
+                if time_parsed:
+                    process_times.append(time_parsed)
+            
+            if process_times:
+                # Last updated (most recent successful processing time)
+                last_time = max(process_times)
+                time_diff = self.current_time - last_time
+                stats['last_updated'] = self.format_time_ago(time_diff)
+                
+                # Processing duration (time span from first to last successful processing)
+                if len(process_times) > 1:
+                    first_time = min(process_times)
+                    duration_diff = last_time - first_time
+                    stats['processing_duration'] = self.format_duration(duration_diff)
+                else:
+                    stats['processing_duration'] = "Single batch"
+            else:
+                stats['last_updated'] = 'Never'
+                stats['processing_duration'] = 'N/A'
+                
+        except Exception as e:
+            print(f"Warning: Time calculation error: {e}")
+            stats['last_updated'] = 'Error calculating time'
+            stats['processing_duration'] = 'N/A'
+    
     def get_stock_breakdown(self) -> Dict:
-        """Get detailed breakdown by stock status."""
+        """Get detailed breakdown by stock status (as per instructions)."""
         stock_df = self.load_stock_data()
         if stock_df is None:
             return {'error': 'Could not load stock data'}
@@ -264,8 +268,15 @@ class PoorStockStatsAnalyzer:
         
         try:
             results_df = pd.read_csv(self.results_file)
-            today = datetime.now().strftime('%Y-%m-%d')
-            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            
+            # Handle boolean conversion
+            if results_df['success'].dtype == 'object':
+                results_df['success'] = results_df['success'].astype(str).str.lower().str.strip().isin(['true', '1', 'yes'])
+            
+            # Use Taipei timezone for date boundaries
+            now_tpe = get_taipei_time()
+            today = now_tpe.strftime('%Y-%m-%d')
+            week_ago = (now_tpe - timedelta(days=7)).strftime('%Y-%m-%d')
             
             # Analyze each stock
             for _, stock_row in stock_df.iterrows():
@@ -276,7 +287,7 @@ class PoorStockStatsAnalyzer:
                 result_mask = results_df['filename'] == expected_filename
                 if result_mask.any():
                     result_row = results_df[result_mask].iloc[0]
-                    process_date = result_row['process_time'][:10] if result_row['process_time'] else ''
+                    process_date = str(result_row['process_time'])[:10] if result_row.get('process_time') is not None else ''
                     
                     if result_row['success']:
                         if process_date == today:
@@ -309,6 +320,21 @@ class PoorStockStatsAnalyzer:
             breakdown['error'] = f"Error analyzing stock breakdown: {e}"
             return breakdown
     
+    def validate_consistency(self) -> Dict:
+        """Cross-reference validation between CSV and actual files."""
+        stats = self.analyze_download_results()
+        md_files_count = stats['md_files_found']
+        csv_successful = stats['successful']
+        
+        validation = {
+            'csv_vs_files_match': csv_successful == md_files_count,
+            'csv_successful': csv_successful,
+            'md_files_found': md_files_count,
+            'discrepancy': abs(csv_successful - md_files_count)
+        }
+        
+        return validation
+    
     def generate_markdown_table(self) -> str:
         """Generate simple markdown status table."""
         stats = self.analyze_download_results()
@@ -337,6 +363,7 @@ class PoorStockStatsAnalyzer:
         """Generate detailed analysis report."""
         stats = self.analyze_download_results()
         breakdown = self.get_stock_breakdown()
+        validation = self.validate_consistency()
         
         # Format timestamp with timezone info
         timestamp_str = self.format_taipei_timestamp()
@@ -369,6 +396,14 @@ class PoorStockStatsAnalyzer:
             self.generate_markdown_table()
         ])
         
+        # Add validation info
+        if not validation['csv_vs_files_match']:
+            report.extend([
+                "\n## Validation Warning",
+                f"⚠️  CSV shows {validation['csv_successful']} successful entries, but found {validation['md_files_found']} MD files.",
+                f"Discrepancy: {validation['discrepancy']} files"
+            ])
+        
         # Add breakdown if available
         if not breakdown.get('error'):
             report.extend([
@@ -398,8 +433,8 @@ class PoorStockStatsAnalyzer:
         report.extend([
             "\n## Notes",
             "- **MD Files Found**: Actual markdown files in poorstock/ directory",
-            "- **Last Updated**: Time since most recent processing attempt",
-            "- **Processing Duration**: Time span from first to last processing in batch",
+            "- **Last Updated**: Time since most recent *successful* processing attempt",
+            "- **Processing Duration**: Time span from first to last successful processing",
             "- **Success Rate**: Percentage of successfully processed stocks"
         ])
         
@@ -408,7 +443,8 @@ class PoorStockStatsAnalyzer:
     def format_taipei_timestamp(self) -> str:
         """Format current time with Taiwan timezone information."""
         if TAIPEI_TZ:
-            return self.current_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+            taipei_time = get_taipei_time()
+            return taipei_time.strftime('%Y-%m-%d %H:%M:%S %Z')
         else:
             return self.current_time.strftime('%Y-%m-%d %H:%M:%S (Taiwan)')
     
@@ -416,12 +452,14 @@ class PoorStockStatsAnalyzer:
         """Export results as JSON."""
         stats = self.analyze_download_results()
         breakdown = self.get_stock_breakdown()
+        validation = self.validate_consistency()
         
         export_data = {
             'generated_at': self.current_time.isoformat(),
             'timezone': 'Asia/Taipei',
             'summary': stats,
-            'breakdown': breakdown if not breakdown.get('error') else None
+            'breakdown': breakdown if not breakdown.get('error') else None,
+            'validation': validation
         }
         
         return json.dumps(export_data, indent=2, ensure_ascii=False)
@@ -502,11 +540,7 @@ def update_readme_status(table_content: str, base_dir: str = "."):
     status_start = content.find('## Status')
     if status_start == -1:
         # Add status section at the end
-        taipei_time = get_taipei_time()
-        if TAIPEI_TZ:
-            current_time_str = taipei_time.strftime('%Y-%m-%d %H:%M:%S %Z')
-        else:
-            current_time_str = taipei_time.strftime('%Y-%m-%d %H:%M:%S (Taiwan)')
+        current_time_str = get_taipei_time().strftime('%Y-%m-%d %H:%M:%S %Z')
         
         new_content = content.rstrip() + f"\n\n## Status\nUpdate time: {current_time_str}\n\n{table_content}\n"
     else:
@@ -516,13 +550,9 @@ def update_readme_status(table_content: str, base_dir: str = "."):
             next_section = len(content)
         
         # Generate current timestamp in Taiwan timezone
-        taipei_time = get_taipei_time()
-        if TAIPEI_TZ:
-            current_time_str = taipei_time.strftime('%Y-%m-%d %H:%M:%S %Z')
-        else:
-            current_time_str = taipei_time.strftime('%Y-%m-%d %H:%M:%S (Taiwan)')
+        current_time_str = get_taipei_time().strftime('%Y-%m-%d %H:%M:%S %Z')
         
-        # Replace the status section with Taiwan timezone timestamp
+        # Replace the status section
         new_content = (
             content[:status_start] +
             "## Status\n" +
