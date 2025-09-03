@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import sys
 import codecs
@@ -134,8 +134,46 @@ class PoorStockBatchRunner:
         else:
             return "UP_TO_DATE", []
 
+    def record_failed_stock(self, stock_id: int):
+        """Record a failed stock processing attempt in the results CSV."""
+        try:
+            stock_df = self.load_stock_data()
+            stock_row = stock_df[stock_df['代號'] == stock_id]
+            
+            if not stock_row.empty:
+                stock_name = stock_row.iloc[0]['名稱']
+                filename = f"poorstock_{stock_id}_{stock_name}.md"
+                
+                process_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Load or create results CSV
+                if self.results_file.exists():
+                    results_df = pd.read_csv(self.results_file)
+                else:
+                    results_df = pd.DataFrame(columns=['filename', 'last_update_time', 'success', 'process_time'])
+                
+                # Update or add record
+                mask = results_df['filename'] == filename
+                if mask.any():
+                    results_df.loc[mask, 'success'] = False
+                    results_df.loc[mask, 'process_time'] = process_time
+                    results_df.loc[mask, 'last_update_time'] = 'FAILED'
+                else:
+                    new_record = pd.DataFrame([{
+                        'filename': filename,
+                        'last_update_time': 'FAILED',
+                        'success': False,
+                        'process_time': process_time
+                    }])
+                    results_df = pd.concat([results_df, new_record], ignore_index=True)
+                
+                results_df.to_csv(self.results_file, index=False)
+                self.safe_log("info", f"[INFO] Recorded failure for stock {stock_id}")
+        except Exception as e:
+            self.safe_log("error", f"[ERROR] Could not record failure for stock {stock_id}: {e}")
+
     def run_single(self, stock_id: int) -> bool:
-        """Call poorstock.py for a single stock."""
+        """Call poorstock.py for a single stock with enhanced error reporting."""
         cmd = [sys.executable, str(self.poorstock_py), str(stock_id)]
         
         self.safe_log("info", f"Running: {' '.join(cmd)}")
@@ -153,20 +191,33 @@ class PoorStockBatchRunner:
                 text=True,
                 encoding='utf-8',
                 env=env,
-                errors='replace'  # Replace problematic characters instead of failing
+                errors='replace',  # Replace problematic characters instead of failing
+                timeout=30  # Add timeout to prevent hanging
             )
             
             if result.returncode == 0:
                 self.safe_log("info", f"[OK] Successfully processed stock {stock_id}")
                 return True
             else:
-                self.safe_log("error", f"[ERROR] Failed to process stock {stock_id}")
+                self.safe_log("error", f"[ERROR] Failed to process stock {stock_id} (exit code: {result.returncode})")
+                
+                # Show both stdout and stderr for debugging
+                if result.stdout:
+                    self.safe_log("error", f"STDOUT: {result.stdout.strip()}")
                 if result.stderr:
-                    self.safe_log("error", f"Error output: {result.stderr}")
+                    self.safe_log("error", f"STDERR: {result.stderr.strip()}")
+                
+                # Record the failure in results CSV
+                self.record_failed_stock(stock_id)
                 return False
                 
+        except subprocess.TimeoutExpired:
+            self.safe_log("error", f"[ERROR] Timeout processing stock {stock_id} (>30 seconds)")
+            self.record_failed_stock(stock_id)
+            return False
         except Exception as e:
             self.safe_log("error", f"[ERROR] Exception running stock {stock_id}: {e}")
+            self.record_failed_stock(stock_id)
             return False
 
     def run_intelligent_batch(self):
