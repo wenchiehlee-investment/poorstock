@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GetAll.py - PoorStock Batch Runner (Windows Compatible)
-Calls poorstock.py for each stock with smart processing logic
+Enhanced GetAll.py - Better handling of intermittent issues
+Includes intelligent retry logic and rate limiting
 """
 
 import pandas as pd
@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 import os
 import sys
 import codecs
+import time
+import random
 
 # Fix encoding issues on Windows
 if sys.platform == "win32":
@@ -24,18 +26,20 @@ def safe_print(message):
     try:
         print(message)
     except UnicodeEncodeError:
-        # Replace problematic Unicode characters with ASCII equivalents
         safe_message = (message
-                       .replace("🧠", "[BRAIN]")
+                       .replace("🧠 ", "[BRAIN]")
                        .replace("📊", "[DATA]")
                        .replace("✅", "[OK]")
                        .replace("❌", "[ERROR]")
                        .replace("🚀", "[START]")
                        .replace("🎉", "[SUCCESS]")
-                       .replace("🎯", "[TARGET]"))
+                       .replace("🎯", "[TARGET]")
+                       .replace("🔄", "[RETRY]")
+                       .replace("⏳", "[WAIT]")
+                       .replace("🛡️", "[PROTECT]"))
         print(safe_message)
 
-class PoorStockBatchRunner:
+class EnhancedBatchRunner:
     def __init__(self, base_dir: str = "."):
         self.base_dir = Path(base_dir)
         self.csv_file = self.base_dir / "StockID_TWSE_TPEX.csv"
@@ -43,13 +47,23 @@ class PoorStockBatchRunner:
         self.poorstock_dir = self.base_dir / "poorstock"
         self.results_file = self.poorstock_dir / "download_results.csv"
         self.poorstock_dir.mkdir(exist_ok=True)
-
+        
+        # Rate limiting settings
+        self.base_delay = 8  # Base delay between requests (increased)
+        self.max_delay = 30  # Maximum delay
+        self.failure_penalty = 5  # Additional delay after failures
+        self.consecutive_failures = 0
+        
+        # Retry settings
+        self.max_retries = 3
+        self.retry_delay_base = 10
+        
         # Setup logging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(self.poorstock_dir / 'batch_runner.log', encoding='utf-8'),
+                logging.FileHandler(self.poorstock_dir / 'enhanced_batch_runner.log', encoding='utf-8'),
                 logging.StreamHandler()
             ]
         )
@@ -63,13 +77,7 @@ class PoorStockBatchRunner:
             elif level == "error":
                 self.logger.error(message)
         except UnicodeEncodeError:
-            safe_message = (message
-                           .replace("🧠", "[BRAIN]")
-                           .replace("📊", "[DATA]")
-                           .replace("✅", "[OK]")
-                           .replace("❌", "[ERROR]")
-                           .replace("🚀", "[START]")
-                           .replace("🎉", "[SUCCESS]"))
+            safe_message = message.encode('ascii', 'replace').decode('ascii')
             if level == "info":
                 self.logger.info(safe_message)
             elif level == "error":
@@ -89,53 +97,174 @@ class PoorStockBatchRunner:
             df = pd.read_csv(self.results_file)
             self.safe_log("info", f"Loaded existing results: {len(df)} records")
         else:
-            df = pd.DataFrame(columns=['filename', 'last_update_time', 'success', 'process_time'])
+            df = pd.DataFrame(columns=['filename', 'last_update_time', 'success', 'process_time', 'retry_count'])
             self.safe_log("info", "Created new results tracking file")
         return df
 
-    def get_expected_filename(self, stock_id: int, stock_name: str) -> str:
-        """Generate expected filename for a stock."""
-        return f"poorstock_{stock_id}_{stock_name}.md"
+    def calculate_dynamic_delay(self):
+        """Calculate delay based on recent failure rate."""
+        delay = self.base_delay
+        
+        # Add penalty for consecutive failures
+        if self.consecutive_failures > 0:
+            penalty = min(self.consecutive_failures * self.failure_penalty, self.max_delay - self.base_delay)
+            delay += penalty
+        
+        # Add random jitter to avoid synchronized requests
+        jitter = random.uniform(0.5, 2.0)
+        delay += jitter
+        
+        return min(delay, self.max_delay)
 
-    def determine_processing_strategy(self, stock_df: pd.DataFrame, results_df: pd.DataFrame) -> tuple:
+    def validate_stock_file(self, stock_id: int, stock_name: str) -> dict:
         """
-        Determine which processing strategy to use based on current state.
-        Returns (strategy_name, stock_ids_to_process)
+        Validate if stock file has complete data.
+        Returns validation results and recommendations.
         """
-        today = datetime.now().strftime('%Y-%m-%d')
+        filename = f"poorstock_{stock_id}_{stock_name}.md"
+        filepath = self.poorstock_dir / filename
         
-        if results_df.empty:
-            return "INITIAL_SCAN", stock_df['代號'].tolist()
+        result = {
+            'exists': filepath.exists(),
+            'complete': False,
+            'has_prices': False,
+            'has_daily_data': False,
+            'has_ownership': False,
+            'has_loading_messages': False,
+            'recommendation': 'skip'
+        }
         
-        failed_stocks = []
-        unprocessed_stocks = []
-        old_successful_stocks = []
+        if not result['exists']:
+            result['recommendation'] = 'process'
+            return result
         
-        for _, stock_row in stock_df.iterrows():
-            stock_id = stock_row['代號']
-            expected_filename = self.get_expected_filename(stock_id, stock_row['名稱'])
+        try:
+            content = filepath.read_text(encoding='utf-8')
             
-            result_mask = results_df['filename'] == expected_filename
-            if result_mask.any():
-                result_row = results_df[result_mask].iloc[0]
-                
-                if not result_row['success']:
-                    failed_stocks.append(stock_id)
-                elif result_row['success'] and not result_row['last_update_time'].startswith(today):
-                    old_successful_stocks.append(stock_id)
+            # Check for loading messages (indicates incomplete data)
+            loading_indicators = ['載入中', '資訊載入中', '分散表載入中']
+            result['has_loading_messages'] = any(indicator in content for indicator in loading_indicators)
+            
+            # Check for actual data presence
+            result['has_prices'] = '開盤' in content and '收盤' in content and '| 200' in content
+            result['has_daily_data'] = '| 2025/' in content and '成交量' in content
+            result['has_ownership'] = '持股比例' in content and '%' in content
+            
+            # Determine completeness
+            data_checks = [result['has_prices'], result['has_daily_data'], result['has_ownership']]
+            result['complete'] = sum(data_checks) >= 2  # At least 2 out of 3 data types
+            
+            # Recommendation logic
+            if result['has_loading_messages'] or not result['complete']:
+                result['recommendation'] = 'retry'
             else:
-                unprocessed_stocks.append(stock_id)
+                # Check file age
+                mod_time = datetime.fromtimestamp(filepath.stat().st_mtime)
+                age_hours = (datetime.now() - mod_time).total_seconds() / 3600
+                
+                if age_hours > 24:  # File older than 24 hours
+                    result['recommendation'] = 'refresh'
+                else:
+                    result['recommendation'] = 'skip'
+            
+        except Exception as e:
+            self.safe_log("error", f"Error validating {filename}: {e}")
+            result['recommendation'] = 'process'
         
-        # Decision logic
-        if failed_stocks or unprocessed_stocks:
-            return "PRIORITY", failed_stocks + unprocessed_stocks
-        elif old_successful_stocks:
-            return "FULL_REFRESH", stock_df['代號'].tolist()
-        else:
-            return "UP_TO_DATE", []
+        return result
 
-    def record_failed_stock(self, stock_id: int):
-        """Record a failed stock processing attempt in the results CSV."""
+    def run_single_with_retry(self, stock_id: int, max_retries: int = None) -> bool:
+        """Run single stock with enhanced retry logic."""
+        if max_retries is None:
+            max_retries = self.max_retries
+        
+        stock_df = self.load_stock_data()
+        stock_row = stock_df[stock_df['代號'] == stock_id]
+        
+        if stock_row.empty:
+            self.safe_log("error", f"Stock {stock_id} not found in CSV")
+            return False
+        
+        stock_name = stock_row.iloc[0]['名稱']
+        
+        for attempt in range(max_retries):
+            try:
+                # Calculate delay before attempt
+                if attempt > 0:
+                    delay = self.retry_delay_base * (2 ** (attempt - 1)) + random.uniform(1, 5)
+                    safe_print(f"[RETRY] Waiting {delay:.1f}s before attempt {attempt + 1} for {stock_id}")
+                    time.sleep(delay)
+                
+                # Determine if we should use Selenium for this attempt
+                use_selenium = attempt > 0  # Use Selenium for retries
+                selenium_flag = "--selenium" if use_selenium else ""
+                
+                cmd = [sys.executable, str(self.poorstock_py), str(stock_id)]
+                if selenium_flag:
+                    cmd.append(selenium_flag)
+                
+                self.safe_log("info", f"Running attempt {attempt + 1}/{max_retries}: {' '.join(cmd)}")
+                
+                # Set environment for proper encoding
+                env = os.environ.copy()
+                env['PYTHONIOENCODING'] = 'utf-8'
+                if sys.platform == "win32":
+                    env['PYTHONLEGACYWINDOWSSTDIO'] = '0'
+                
+                result = subprocess.run(
+                    cmd, 
+                    cwd=self.base_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    env=env,
+                    errors='replace',
+                    timeout=60  # Increased timeout for Selenium
+                )
+                
+                if result.returncode == 0:
+                    # Validate the result
+                    validation = self.validate_stock_file(stock_id, stock_name)
+                    
+                    if validation['complete'] and not validation['has_loading_messages']:
+                        safe_print(f"[OK] Stock {stock_id} completed successfully on attempt {attempt + 1}")
+                        self.consecutive_failures = 0  # Reset failure counter
+                        return True
+                    else:
+                        safe_print(f"[WARNING] Stock {stock_id} incomplete on attempt {attempt + 1}")
+                        if attempt == max_retries - 1:
+                            safe_print(f"[ERROR] Stock {stock_id} still incomplete after all retries")
+                            self.record_failed_stock(stock_id, attempt + 1)
+                            return False
+                else:
+                    self.safe_log("error", f"Stock {stock_id} failed attempt {attempt + 1} (exit code: {result.returncode})")
+                    if result.stdout:
+                        self.safe_log("error", f"STDOUT: {result.stdout.strip()}")
+                    if result.stderr:
+                        self.safe_log("error", f"STDERR: {result.stderr.strip()}")
+                    
+                    if attempt == max_retries - 1:
+                        self.record_failed_stock(stock_id, attempt + 1)
+                        self.consecutive_failures += 1
+                        return False
+                        
+            except subprocess.TimeoutExpired:
+                self.safe_log("error", f"Timeout processing stock {stock_id} attempt {attempt + 1}")
+                if attempt == max_retries - 1:
+                    self.record_failed_stock(stock_id, attempt + 1)
+                    self.consecutive_failures += 1
+                    return False
+            except Exception as e:
+                self.safe_log("error", f"Exception processing stock {stock_id} attempt {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    self.record_failed_stock(stock_id, attempt + 1)
+                    self.consecutive_failures += 1
+                    return False
+        
+        return False
+
+    def record_failed_stock(self, stock_id: int, retry_count: int):
+        """Record a failed stock processing attempt."""
         try:
             stock_df = self.load_stock_data()
             stock_row = stock_df[stock_df['代號'] == stock_id]
@@ -146,201 +275,249 @@ class PoorStockBatchRunner:
                 
                 process_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Load or create results CSV
                 if self.results_file.exists():
                     results_df = pd.read_csv(self.results_file)
                 else:
-                    results_df = pd.DataFrame(columns=['filename', 'last_update_time', 'success', 'process_time'])
+                    results_df = pd.DataFrame(columns=['filename', 'last_update_time', 'success', 'process_time', 'retry_count'])
                 
-                # Update or add record
+                # Ensure retry_count column exists
+                if 'retry_count' not in results_df.columns:
+                    results_df['retry_count'] = 0
+                
                 mask = results_df['filename'] == filename
                 if mask.any():
                     results_df.loc[mask, 'success'] = False
                     results_df.loc[mask, 'process_time'] = process_time
                     results_df.loc[mask, 'last_update_time'] = 'FAILED'
+                    results_df.loc[mask, 'retry_count'] = retry_count
                 else:
                     new_record = pd.DataFrame([{
                         'filename': filename,
                         'last_update_time': 'FAILED',
                         'success': False,
-                        'process_time': process_time
+                        'process_time': process_time,
+                        'retry_count': retry_count
                     }])
                     results_df = pd.concat([results_df, new_record], ignore_index=True)
                 
                 results_df.to_csv(self.results_file, index=False)
-                self.safe_log("info", f"[INFO] Recorded failure for stock {stock_id}")
+                self.safe_log("info", f"Recorded failure for stock {stock_id} after {retry_count} attempts")
         except Exception as e:
-            self.safe_log("error", f"[ERROR] Could not record failure for stock {stock_id}: {e}")
+            self.safe_log("error", f"Could not record failure for stock {stock_id}: {e}")
 
-    def run_single(self, stock_id: int) -> bool:
-        """Call poorstock.py for a single stock with enhanced error reporting."""
-        cmd = [sys.executable, str(self.poorstock_py), str(stock_id)]
+    def determine_processing_strategy(self, stock_df: pd.DataFrame) -> tuple:
+        """Enhanced strategy determination with file validation."""
+        today = datetime.now().strftime('%Y-%m-%d')
         
-        self.safe_log("info", f"Running: {' '.join(cmd)}")
-        try:
-            # Set environment variables for proper UTF-8 encoding
-            env = os.environ.copy()
-            env['PYTHONIOENCODING'] = 'utf-8'
-            if sys.platform == "win32":
-                env['PYTHONLEGACYWINDOWSSTDIO'] = '0'
+        priority_stocks = []      # Failed or incomplete stocks
+        refresh_stocks = []       # Old but complete stocks
+        failed_stocks = []        # Previously failed stocks to retry
+        unprocessed_stocks = []   # Never processed stocks
+        
+        for _, stock_row in stock_df.iterrows():
+            stock_id = stock_row['代號']
+            stock_name = stock_row['名稱']
             
-            result = subprocess.run(
-                cmd, 
-                cwd=self.base_dir,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                env=env,
-                errors='replace',  # Replace problematic characters instead of failing
-                timeout=30  # Add timeout to prevent hanging
-            )
+            validation = self.validate_stock_file(stock_id, stock_name)
             
-            if result.returncode == 0:
-                self.safe_log("info", f"[OK] Successfully processed stock {stock_id}")
-                return True
-            else:
-                self.safe_log("error", f"[ERROR] Failed to process stock {stock_id} (exit code: {result.returncode})")
-                
-                # Show both stdout and stderr for debugging
-                if result.stdout:
-                    self.safe_log("error", f"STDOUT: {result.stdout.strip()}")
-                if result.stderr:
-                    self.safe_log("error", f"STDERR: {result.stderr.strip()}")
-                
-                # Record the failure in results CSV
-                self.record_failed_stock(stock_id)
-                return False
-                
-        except subprocess.TimeoutExpired:
-            self.safe_log("error", f"[ERROR] Timeout processing stock {stock_id} (>30 seconds)")
-            self.record_failed_stock(stock_id)
-            return False
-        except Exception as e:
-            self.safe_log("error", f"[ERROR] Exception running stock {stock_id}: {e}")
-            self.record_failed_stock(stock_id)
-            return False
+            if validation['recommendation'] == 'process':
+                unprocessed_stocks.append(stock_id)
+            elif validation['recommendation'] == 'retry':
+                priority_stocks.append(stock_id)
+            elif validation['recommendation'] == 'refresh':
+                refresh_stocks.append(stock_id)
+        
+        # Check results CSV for additional failed stocks
+        if self.results_file.exists():
+            results_df = pd.read_csv(self.results_file)
+            failed_mask = (results_df['success'] == False) | (results_df['last_update_time'] == 'FAILED')
+            failed_files = results_df[failed_mask]['filename'].tolist()
+            
+            for filename in failed_files:
+                try:
+                    stock_id = int(filename.split('_')[1])
+                    if stock_id not in priority_stocks and stock_id not in failed_stocks:
+                        failed_stocks.append(stock_id)
+                except (ValueError, IndexError):
+                    continue
+        
+        # Decision logic
+        if priority_stocks or unprocessed_stocks or failed_stocks:
+            all_priority = priority_stocks + unprocessed_stocks + failed_stocks
+            return "PRIORITY", all_priority
+        elif refresh_stocks:
+            return "REFRESH", refresh_stocks[:20]  # Limit refresh batch
+        else:
+            return "UP_TO_DATE", []
 
-    def run_intelligent_batch(self):
-        """Batch process using intelligent strategy selection."""
+    def run_intelligent_batch_enhanced(self):
+        """Enhanced batch processing with better error handling."""
         stock_df = self.load_stock_data()
-        results_df = self.load_or_create_results_csv()
         
-        strategy, stock_ids_to_process = self.determine_processing_strategy(stock_df, results_df)
+        strategy, stock_ids_to_process = self.determine_processing_strategy(stock_df)
         
-        self.safe_log("info", f"[BRAIN] Processing strategy: {strategy}")
-        self.safe_log("info", f"[DATA] Stocks to process: {len(stock_ids_to_process)}")
+        safe_print(f"[BRAIN] Strategy: {strategy}")
+        safe_print(f"[DATA] Stocks to process: {len(stock_ids_to_process)}")
         
         if strategy == "UP_TO_DATE":
-            self.safe_log("info", "[OK] All stocks are up to date. No processing needed.")
+            safe_print("[OK] All stocks are up to date")
             return
         
-        # Execute processing
+        # Process stocks with enhanced logic
         success_count = 0
         fail_count = 0
         total = len(stock_ids_to_process)
         
         for i, stock_id in enumerate(stock_ids_to_process, 1):
-            stock_row = stock_df[stock_df['代號'] == stock_id].iloc[0]
-            stock_name = stock_row['名稱']
-            
-            self.safe_log("info", f"[{i}/{total}] Processing {stock_id} ({stock_name})")
-            
-            if self.run_single(stock_id):
-                success_count += 1
-            else:
+            try:
+                stock_row = stock_df[stock_df['代號'] == stock_id].iloc[0]
+                stock_name = stock_row['名稱']
+                
+                safe_print(f"\n[{i}/{total}] Processing {stock_id} ({stock_name})")
+                
+                # Calculate and apply dynamic delay
+                delay = self.calculate_dynamic_delay()
+                if i > 1:  # No delay for first request
+                    safe_print(f"[WAIT] Applying rate limit: {delay:.1f}s")
+                    time.sleep(delay)
+                
+                # Process with retry
+                if self.run_single_with_retry(stock_id):
+                    success_count += 1
+                    safe_print(f"[SUCCESS] {stock_id} completed")
+                else:
+                    fail_count += 1
+                    safe_print(f"[FAILED] {stock_id} failed after all retries")
+                
+                # Progress update every 10 stocks
+                if i % 10 == 0:
+                    progress = (i / total) * 100
+                    safe_print(f"[PROGRESS] {progress:.1f}% complete - Success: {success_count}, Failed: {fail_count}")
+                
+            except KeyboardInterrupt:
+                safe_print("[INTERRUPT] Processing interrupted by user")
+                break
+            except Exception as e:
+                safe_print(f"[ERROR] Unexpected error processing stock {stock_id}: {e}")
                 fail_count += 1
-            
-            # Small delay between requests
-            import time
-            time.sleep(10)
         
-        self.safe_log("info", f"[SUCCESS] Batch processing complete!")
-        self.safe_log("info", f"[OK] Successful: {success_count}")
-        self.safe_log("info", f"[ERROR] Failed: {fail_count}")
+        safe_print(f"\n[COMPLETE] Batch processing finished!")
+        safe_print(f"[STATS] Success: {success_count}, Failed: {fail_count}, Total: {total}")
+        
+        if fail_count > 0:
+            safe_print(f"[SUGGEST] Failed stocks can be retried with --retry-failed flag")
 
-    def run_all_stocks(self):
-        """Process all stocks regardless of previous status."""
-        stock_df = self.load_stock_data()
-        total = len(stock_df)
-        success = 0
-        fail = 0
+    def retry_failed_stocks(self):
+        """Retry only previously failed stocks with Selenium."""
+        if not self.results_file.exists():
+            safe_print("[INFO] No results file found - nothing to retry")
+            return
         
-        self.safe_log("info", f"[START] Processing all {total} stocks...")
+        results_df = pd.read_csv(self.results_file)
+        failed_mask = (results_df['success'] == False) | (results_df['last_update_time'] == 'FAILED')
+        failed_files = results_df[failed_mask]['filename'].tolist()
         
-        for i, row in enumerate(stock_df.itertuples(), 1):
-            stock_id = row.代號
-            stock_name = row.名稱
-            self.safe_log("info", f"[{i}/{total}] Processing {stock_id} ({stock_name})")
+        failed_stock_ids = []
+        for filename in failed_files:
+            try:
+                stock_id = int(filename.split('_')[1])
+                failed_stock_ids.append(stock_id)
+            except (ValueError, IndexError):
+                continue
+        
+        if not failed_stock_ids:
+            safe_print("[OK] No failed stocks found to retry")
+            return
+        
+        safe_print(f"[RETRY] Found {len(failed_stock_ids)} failed stocks to retry")
+        
+        success_count = 0
+        for i, stock_id in enumerate(failed_stock_ids, 1):
+            safe_print(f"\n[RETRY {i}/{len(failed_stock_ids)}] Retrying stock {stock_id} with Selenium")
             
-            if self.run_single(stock_id):
-                success += 1
-            else:
-                fail += 1
+            if i > 1:
+                delay = 15 + random.uniform(5, 10)  # Longer delays for retries
+                safe_print(f"[WAIT] Retry delay: {delay:.1f}s")
+                time.sleep(delay)
             
-            # Delay between requests
-            import time
-            time.sleep(10)
+            if self.run_single_with_retry(stock_id, max_retries=2):
+                success_count += 1
         
-        self.safe_log("info", f"[SUCCESS] All stocks processed: Success={success}, Fail={fail}")
+        safe_print(f"[COMPLETE] Retry session finished: {success_count}/{len(failed_stock_ids)} recovered")
 
-    def get_status_report(self) -> dict:
-        """Generate a status report of current processing state."""
+    def get_enhanced_status_report(self) -> dict:
+        """Generate enhanced status report."""
         try:
             stock_df = self.load_stock_data()
-            results_df = self.load_or_create_results_csv()
             
-            strategy, to_process = self.determine_processing_strategy(stock_df, results_df)
+            complete_count = 0
+            incomplete_count = 0
+            failed_count = 0
+            unprocessed_count = 0
             
-            successful = len(results_df[results_df['success'] == True]) if not results_df.empty else 0
-            failed = len(results_df[results_df['success'] == False]) if not results_df.empty else 0
-            unprocessed = len(stock_df) - len(results_df) if not results_df.empty else len(stock_df)
+            for _, stock_row in stock_df.iterrows():
+                stock_id = stock_row['代號']
+                stock_name = stock_row['名稱']
+                
+                validation = self.validate_stock_file(stock_id, stock_name)
+                
+                if not validation['exists']:
+                    unprocessed_count += 1
+                elif validation['complete'] and not validation['has_loading_messages']:
+                    complete_count += 1
+                elif validation['has_loading_messages']:
+                    incomplete_count += 1
+                else:
+                    failed_count += 1
             
-            # Count actual markdown files
             md_files = list(self.poorstock_dir.glob("poorstock_*.md"))
             
             return {
                 'total_stocks': len(stock_df),
-                'successful': successful,
-                'failed': failed,
-                'unprocessed': unprocessed,
+                'complete': complete_count,
+                'incomplete': incomplete_count,
+                'failed': failed_count,
+                'unprocessed': unprocessed_count,
                 'md_files_found': len(md_files),
-                'current_strategy': strategy,
-                'stocks_to_process': len(to_process),
+                'consecutive_failures': self.consecutive_failures,
                 'last_check': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
         except Exception as e:
-            self.safe_log("error", f"Error generating status report: {e}")
             return {'error': str(e)}
 
 def main():
-    parser = argparse.ArgumentParser(description='GetAll - PoorStock Batch Runner with Smart Processing')
+    parser = argparse.ArgumentParser(description='Enhanced GetAll - Smart Processing with Retry Logic')
     parser.add_argument('--stock-id', type=int, help='Process specific stock ID only')
-    parser.add_argument('--status', action='store_true', help='Show current status report')
-    parser.add_argument('--all', action='store_true', help='Process all stocks (ignore smart logic)')
+    parser.add_argument('--status', action='store_true', help='Show enhanced status report')
+    parser.add_argument('--retry-failed', action='store_true', help='Retry only previously failed stocks')
+    parser.add_argument('--all', action='store_true', help='Process all stocks')
     parser.add_argument('--base-dir', default='.', help='Base directory for files')
     
     args = parser.parse_args()
     
-    runner = PoorStockBatchRunner(args.base_dir)
+    runner = EnhancedBatchRunner(args.base_dir)
     
     if args.status:
-        report = runner.get_status_report()
-        safe_print("\n=== PoorStock Processing Status Report ===")
+        report = runner.get_enhanced_status_report()
+        safe_print("\n=== Enhanced PoorStock Status Report ===")
         for key, value in report.items():
             safe_print(f"{key.replace('_', ' ').title()}: {value}")
     elif args.stock_id:
         safe_print(f"[TARGET] Processing single stock: {args.stock_id}")
-        if runner.run_single(args.stock_id):
-            safe_print(f"[OK] Successfully processed stock {args.stock_id}")
+        if runner.run_single_with_retry(args.stock_id):
+            safe_print(f"[SUCCESS] Stock {args.stock_id} processed successfully")
         else:
-            safe_print(f"[ERROR] Failed to process stock {args.stock_id}")
+            safe_print(f"[FAILED] Stock {args.stock_id} processing failed")
             sys.exit(1)
+    elif args.retry_failed:
+        safe_print("[RETRY] Retrying failed stocks with enhanced methods")
+        runner.retry_failed_stocks()
     elif args.all:
-        safe_print("[START] Processing ALL stocks (bypassing smart logic)")
-        runner.run_all_stocks()
+        safe_print("[START] Processing ALL stocks")
+        runner.run_intelligent_batch_enhanced()
     else:
-        safe_print("[BRAIN] Using intelligent processing strategy")
-        runner.run_intelligent_batch()
+        safe_print("[BRAIN] Using enhanced intelligent processing")
+        runner.run_intelligent_batch_enhanced()
 
 if __name__ == "__main__":
     main()
