@@ -2,15 +2,15 @@
 Working space for poorstock
 
 ## Status
-Update time: 2025-09-07 18:07:54 CST
+Update time: 2025-09-08 12:53:18 CST
 
 | Metric | Value |
 |--------|-------|
 | Total Stocks | 117 |
-| Successful | 31 (26.5%) |
-| Failed | 86 |
+| Successful | 107 (91.5%) |
+| Failed | 10 |
 | Unprocessed | 0 |
 | MD Files Found | 108 |
-| Last Updated | 3 days 23 hours ago |
-| Processing Duration | 20 minutes |
+| Last Updated | 50 minutes ago |
+| Processing Duration | 4 days 17 hours |
 
