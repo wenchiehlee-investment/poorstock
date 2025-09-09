@@ -2,6 +2,7 @@
 """
 Enhanced GetAll.py - Better handling of intermittent issues
 Includes intelligent retry logic and rate limiting
+FIXED: 24-hour refresh policy now works even when there are failed stocks
 """
 
 import pandas as pd
@@ -306,13 +307,16 @@ class EnhancedBatchRunner:
             self.safe_log("error", f"Could not record failure for stock {stock_id}: {e}")
 
     def determine_processing_strategy(self, stock_df: pd.DataFrame) -> tuple:
-        """Enhanced strategy determination with file validation."""
+        """
+        Enhanced strategy determination with file validation.
+        FIXED: Now processes BOTH priority AND refresh stocks in same batch.
+        """
         today = datetime.now().strftime('%Y-%m-%d')
         
-        priority_stocks = []      # Failed or incomplete stocks
-        refresh_stocks = []       # Old but complete stocks
-        failed_stocks = []        # Previously failed stocks to retry
-        unprocessed_stocks = []   # Never processed stocks
+        priority_stocks = []      # Failed or incomplete stocks (HIGH PRIORITY)
+        refresh_stocks = []       # Old but complete stocks (MEDIUM PRIORITY)
+        failed_stocks = []        # Previously failed stocks to retry (HIGH PRIORITY)
+        unprocessed_stocks = []   # Never processed stocks (HIGH PRIORITY)
         
         for _, stock_row in stock_df.iterrows():
             stock_id = stock_row['代號']
@@ -341,14 +345,37 @@ class EnhancedBatchRunner:
                 except (ValueError, IndexError):
                     continue
         
-        # Decision logic
-        if priority_stocks or unprocessed_stocks or failed_stocks:
-            all_priority = priority_stocks + unprocessed_stocks + failed_stocks
-            return "PRIORITY", all_priority
+        # FIXED: Combine both priority and refresh stocks
+        high_priority = priority_stocks + unprocessed_stocks + failed_stocks
+        
+        # Decision logic (FIXED)
+        stocks_to_process = []
+        strategy = "UP_TO_DATE"
+        
+        if high_priority:
+            # Always process high priority stocks first
+            stocks_to_process.extend(high_priority)
+            strategy = "PRIORITY"
+            
+            # Add some refresh stocks if we have capacity (limit total batch size)
+            if len(refresh_stocks) > 0:
+                remaining_capacity = max(0, 50 - len(high_priority))  # Limit total to 50
+                if remaining_capacity > 0:
+                    stocks_to_process.extend(refresh_stocks[:remaining_capacity])
+                    strategy = "MIXED"  # Indicates both priority and refresh
+                    safe_print(f"[STRATEGY] Adding {min(remaining_capacity, len(refresh_stocks))} refresh stocks to batch")
         elif refresh_stocks:
-            return "REFRESH", refresh_stocks[:20]  # Limit refresh batch
-        else:
-            return "UP_TO_DATE", []
+            # No priority stocks, but have refresh stocks
+            stocks_to_process = refresh_stocks[:20]  # Limit refresh batch
+            strategy = "REFRESH"
+        
+        # Log strategy details
+        if high_priority:
+            safe_print(f"[PRIORITY] {len(high_priority)} stocks need immediate attention")
+        if refresh_stocks:
+            safe_print(f"[REFRESH] {len(refresh_stocks)} stocks are >24h old")
+        
+        return strategy, stocks_to_process
 
     def run_intelligent_batch_enhanced(self):
         """Enhanced batch processing with better error handling."""
@@ -454,6 +481,7 @@ class EnhancedBatchRunner:
             incomplete_count = 0
             failed_count = 0
             unprocessed_count = 0
+            refresh_needed_count = 0
             
             for _, stock_row in stock_df.iterrows():
                 stock_id = stock_row['代號']
@@ -463,6 +491,8 @@ class EnhancedBatchRunner:
                 
                 if not validation['exists']:
                     unprocessed_count += 1
+                elif validation['recommendation'] == 'refresh':
+                    refresh_needed_count += 1
                 elif validation['complete'] and not validation['has_loading_messages']:
                     complete_count += 1
                 elif validation['has_loading_messages']:
@@ -478,6 +508,7 @@ class EnhancedBatchRunner:
                 'incomplete': incomplete_count,
                 'failed': failed_count,
                 'unprocessed': unprocessed_count,
+                'refresh_needed': refresh_needed_count,
                 'md_files_found': len(md_files),
                 'consecutive_failures': self.consecutive_failures,
                 'last_check': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
