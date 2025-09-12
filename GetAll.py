@@ -2,7 +2,7 @@
 """
 Enhanced GetAll.py - Better handling of intermittent issues
 Includes intelligent retry logic and rate limiting
-FIXED: 24-hour refresh policy now works even when there are failed stocks
+UNLIMITED VERSION: Removed all artificial capacity limitations
 """
 
 import pandas as pd
@@ -308,13 +308,13 @@ class EnhancedBatchRunner:
 
     def determine_processing_strategy(self, stock_df: pd.DataFrame) -> tuple:
         """
-        Enhanced strategy determination with file validation.
-        FIXED: Now processes BOTH priority AND refresh stocks in same batch.
+        UNLIMITED: Enhanced strategy determination with NO artificial capacity limits.
+        Now processes ALL stocks that need updating without arbitrary restrictions.
         """
         today = datetime.now().strftime('%Y-%m-%d')
         
         priority_stocks = []      # Failed or incomplete stocks (HIGH PRIORITY)
-        refresh_stocks = []       # Old but complete stocks (MEDIUM PRIORITY)
+        refresh_stocks = []       # Old but complete stocks (DAILY REFRESH)
         failed_stocks = []        # Previously failed stocks to retry (HIGH PRIORITY)
         unprocessed_stocks = []   # Never processed stocks (HIGH PRIORITY)
         
@@ -345,55 +345,58 @@ class EnhancedBatchRunner:
                 except (ValueError, IndexError):
                     continue
         
-        # FIXED: Combine both priority and refresh stocks
         high_priority = priority_stocks + unprocessed_stocks + failed_stocks
         
-        # Decision logic (FIXED)
+        # UNLIMITED: Process ALL stocks that need updating (NO CAPACITY LIMITS)
         stocks_to_process = []
         strategy = "UP_TO_DATE"
         
         if high_priority:
-            # Always process high priority stocks first
+            # Process ALL high priority stocks (removed limit)
             stocks_to_process.extend(high_priority)
             strategy = "PRIORITY"
             
-            # Add some refresh stocks if we have capacity (limit total batch size)
+            # Add ALL refresh stocks (removed capacity limit)
             if len(refresh_stocks) > 0:
-                remaining_capacity = max(0, 50 - len(high_priority))  # Limit total to 50
-                if remaining_capacity > 0:
-                    stocks_to_process.extend(refresh_stocks[:remaining_capacity])
-                    strategy = "MIXED"  # Indicates both priority and refresh
-                    safe_print(f"[STRATEGY] Adding {min(remaining_capacity, len(refresh_stocks))} refresh stocks to batch")
+                stocks_to_process.extend(refresh_stocks)
+                strategy = "UNLIMITED_MIXED"  # Both priority and refresh, no limits
+                safe_print(f"[UNLIMITED] Processing ALL {len(refresh_stocks)} refresh stocks with {len(high_priority)} priority stocks")
         elif refresh_stocks:
-            # No priority stocks, but have refresh stocks
-            stocks_to_process = refresh_stocks[:20]  # Limit refresh batch
-            strategy = "REFRESH"
+            # Process ALL refresh stocks (removed limit from :20 to all)
+            stocks_to_process = refresh_stocks  # Process ALL refresh stocks
+            strategy = "UNLIMITED_REFRESH"
         
         # Log strategy details
         if high_priority:
             safe_print(f"[PRIORITY] {len(high_priority)} stocks need immediate attention")
         if refresh_stocks:
-            safe_print(f"[REFRESH] {len(refresh_stocks)} stocks are >24h old")
+            safe_print(f"[REFRESH] {len(refresh_stocks)} stocks are >24h old - ALL will be processed")
+        
+        safe_print(f"[UNLIMITED] Total stocks to process: {len(stocks_to_process)} (no artificial limits)")
         
         return strategy, stocks_to_process
 
     def run_intelligent_batch_enhanced(self):
-        """Enhanced batch processing with better error handling."""
+        """Enhanced batch processing with NO capacity limitations."""
         stock_df = self.load_stock_data()
         
         strategy, stock_ids_to_process = self.determine_processing_strategy(stock_df)
         
         safe_print(f"[BRAIN] Strategy: {strategy}")
-        safe_print(f"[DATA] Stocks to process: {len(stock_ids_to_process)}")
+        safe_print(f"[DATA] Stocks to process: {len(stock_ids_to_process)} (UNLIMITED)")
         
         if strategy == "UP_TO_DATE":
             safe_print("[OK] All stocks are up to date")
             return
         
-        # Process stocks with enhanced logic
+        # Process ALL stocks with enhanced logic
         success_count = 0
         fail_count = 0
         total = len(stock_ids_to_process)
+        
+        # Estimate completion time
+        estimated_minutes = (total * 12) // 60  # ~12 seconds per stock average
+        safe_print(f"[ESTIMATE] Processing {total} stocks will take approximately {estimated_minutes} minutes")
         
         for i, stock_id in enumerate(stock_ids_to_process, 1):
             try:
@@ -419,7 +422,9 @@ class EnhancedBatchRunner:
                 # Progress update every 10 stocks
                 if i % 10 == 0:
                     progress = (i / total) * 100
-                    safe_print(f"[PROGRESS] {progress:.1f}% complete - Success: {success_count}, Failed: {fail_count}")
+                    remaining = total - i
+                    eta_minutes = (remaining * 12) // 60
+                    safe_print(f"[PROGRESS] {progress:.1f}% complete - Success: {success_count}, Failed: {fail_count}, ETA: {eta_minutes}min")
                 
             except KeyboardInterrupt:
                 safe_print("[INTERRUPT] Processing interrupted by user")
@@ -428,8 +433,9 @@ class EnhancedBatchRunner:
                 safe_print(f"[ERROR] Unexpected error processing stock {stock_id}: {e}")
                 fail_count += 1
         
-        safe_print(f"\n[COMPLETE] Batch processing finished!")
+        safe_print(f"\n[COMPLETE] UNLIMITED batch processing finished!")
         safe_print(f"[STATS] Success: {success_count}, Failed: {fail_count}, Total: {total}")
+        safe_print(f"[STRATEGY] Used: {strategy}")
         
         if fail_count > 0:
             safe_print(f"[SUGGEST] Failed stocks can be retried with --retry-failed flag")
@@ -511,13 +517,14 @@ class EnhancedBatchRunner:
                 'refresh_needed': refresh_needed_count,
                 'md_files_found': len(md_files),
                 'consecutive_failures': self.consecutive_failures,
-                'last_check': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'last_check': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'unlimited_mode': True
             }
         except Exception as e:
             return {'error': str(e)}
 
 def main():
-    parser = argparse.ArgumentParser(description='Enhanced GetAll - Smart Processing with Retry Logic')
+    parser = argparse.ArgumentParser(description='Enhanced GetAll - UNLIMITED Processing with No Capacity Limits')
     parser.add_argument('--stock-id', type=int, help='Process specific stock ID only')
     parser.add_argument('--status', action='store_true', help='Show enhanced status report')
     parser.add_argument('--retry-failed', action='store_true', help='Retry only previously failed stocks')
@@ -530,7 +537,7 @@ def main():
     
     if args.status:
         report = runner.get_enhanced_status_report()
-        safe_print("\n=== Enhanced PoorStock Status Report ===")
+        safe_print("\n=== Enhanced PoorStock Status Report (UNLIMITED) ===")
         for key, value in report.items():
             safe_print(f"{key.replace('_', ' ').title()}: {value}")
     elif args.stock_id:
@@ -544,10 +551,10 @@ def main():
         safe_print("[RETRY] Retrying failed stocks with enhanced methods")
         runner.retry_failed_stocks()
     elif args.all:
-        safe_print("[START] Processing ALL stocks")
+        safe_print("[START] Processing ALL stocks (UNLIMITED MODE)")
         runner.run_intelligent_batch_enhanced()
     else:
-        safe_print("[BRAIN] Using enhanced intelligent processing")
+        safe_print("[BRAIN] Using UNLIMITED intelligent processing - NO capacity limits")
         runner.run_intelligent_batch_enhanced()
 
 if __name__ == "__main__":
