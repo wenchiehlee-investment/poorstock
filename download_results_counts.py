@@ -158,9 +158,20 @@ class PoorStockStatsAnalyzer:
             processed = len(df)
             unprocessed = max(0, total_stocks - processed)
             
+            # Calculate Freshness (Successful AND < 24 hours old)
+            freshly_updated = 0
+            one_day_ago = self.current_time - timedelta(days=1)
+            
+            for _, row in df.iterrows():
+                if row['success']:
+                    t = self.safe_parse_date_naive(row.get('process_time'))
+                    if t and t >= one_day_ago:
+                        freshly_updated += 1
+
             stats = {
                 'total_stocks': total_stocks,
                 'successful': successful,
+                'freshly_updated': freshly_updated,
                 'failed': failed,
                 'unprocessed': unprocessed,
                 'md_files_found': len(md_files),
@@ -175,6 +186,8 @@ class PoorStockStatsAnalyzer:
         except Exception as e:
             default_stats['error'] = f"Error reading results file: {str(e)}"
             default_stats['unprocessed'] = total_stocks
+            # Ensure key exists even on error
+            default_stats['freshly_updated'] = 0
             return default_stats
     
     def _calculate_time_metrics(self, df: pd.DataFrame, stats: Dict):
@@ -302,7 +315,8 @@ class PoorStockStatsAnalyzer:
         ]
         lines.extend([
             f"| Total Stocks | {stats['total_stocks']:,} |",
-            f"| Successful | {stats['successful']:,} ({stats['success_rate']:.1f}%) |",
+            f"| Successful (Total) | {stats['successful']:,} ({stats['success_rate']:.1f}%) |",
+            f"| Freshly Updated (<24h) | {stats['freshly_updated']:,} |",
             f"| Failed | {stats['failed']:,} |",
             f"| Unprocessed | {stats['unprocessed']:,} |",
             f"| MD Files Found | {stats['md_files_found']:,} |",
@@ -333,7 +347,8 @@ class PoorStockStatsAnalyzer:
         else:
             report.extend([
                 f"**Total Stocks**: {stats['total_stocks']:,}",
-                f"**Successful**: {stats['successful']:,} ({stats['success_rate']:.1f}%)",
+                f"**Successful (Total)**: {stats['successful']:,} ({stats['success_rate']:.1f}%)",
+                f"**Freshly Updated (<24h)**: {stats['freshly_updated']:,}",
                 f"**Failed**: {stats['failed']:,}",
                 f"**Unprocessed**: {stats['unprocessed']:,}",
                 f"**MD Files Found**: {stats['md_files_found']:,}",

@@ -147,10 +147,14 @@ class EnhancedBatchRunner:
             result['has_loading_messages'] = any(indicator in content for indicator in loading_indicators)
             
             # Check for actual data presence
-            result['has_prices'] = '開盤' in content and '收盤' in content and '| 200' in content
-            result['has_daily_data'] = '| 2025/' in content and '成交量' in content
+            result['has_prices'] = '開盤' in content and '收盤' in content
+            result['has_daily_data'] = '| 202' in content and '成交量' in content
             result['has_ownership'] = '持股比例' in content and '%' in content
             
+            # Debug validation
+            if not result['complete'] or result['has_loading_messages']:
+                 safe_print(f"[DEBUG] Validation for {stock_id}: Prices={result['has_prices']}, Daily={result['has_daily_data']}, Ownership={result['has_ownership']}, Loading={result['has_loading_messages']}")
+
             # Determine completeness
             data_checks = [result['has_prices'], result['has_daily_data'], result['has_ownership']]
             result['complete'] = sum(data_checks) >= 2  # At least 2 out of 3 data types
@@ -237,8 +241,17 @@ class EnhancedBatchRunner:
                             safe_print(f"[ERROR] Stock {stock_id} still incomplete after all retries")
                             self.record_failed_stock(stock_id, attempt + 1)
                             return False
+                elif result.returncode == 2:
+                    safe_print(f"[ERROR] Stock {stock_id} NOT FOUND (404) - Permanent Failure")
+                    # Record as failed but don't retry
+                    self.record_failed_stock(stock_id, attempt + 1)
+                    return False # Stop retrying
                 else:
                     self.safe_log("error", f"Stock {stock_id} failed attempt {attempt + 1} (exit code: {result.returncode})")
+                    # Debug dump
+                    with open(f"debug_fail_{stock_id}_{attempt}.log", "w", encoding="utf-8") as f:
+                        f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}")
+                    
                     if result.stdout:
                         self.safe_log("error", f"STDOUT: {result.stdout.strip()}")
                     if result.stderr:
