@@ -49,7 +49,7 @@ POORSTOCK_DIR = "poorstock/"
 ### CSV Parsing Logic
 ```python
 # Expected CSV structure:
-# filename,last_update_time,success,process_time
+# filename,last_update_time,success,process_time,retry_count
 # poorstock_2412_中華電.md,2025-01-15 10:30:25,true,2025-01-15 10:30:25
 # 
 # Parse requirements:
